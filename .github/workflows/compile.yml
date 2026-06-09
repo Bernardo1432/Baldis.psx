@@ -1,0 +1,22 @@
+name: Compilar Jogo de PS1
+on: [push]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar Codigo Fonte
+        uses: actions/checkout@v3
+
+      - name: Compilar para PlayStation 1
+        uses: lameguy64/psx-compile-action@v1
+        with:
+          project-dir: '.'
+          output-name: 'baldi.bin'
+
+      - name: Disponibilizar Download do Jogo
+        uses: actions/upload-artifact@v3
+        with:
+          name: Baldi-PS1-ROM
+          path: baldi.bin
+          
