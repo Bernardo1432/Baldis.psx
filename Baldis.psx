@@ -1,0 +1,229 @@
+#include <sys/types.h>
+#include <libgte.h>
+#include <libgpu.h>
+#include <libetc.h>
+
+#define VIDEO_LARGURA 320
+#define VIDEO_ALTURA  240
+#define MAPA_LARGURA 16
+#define MAPA_ALTURA 16
+#define FOV 0.78539f // PI / 4
+#define PROFUNDIDADE_MAX 12.0f
+#define TOTAL_CADERNOS 7
+
+// Estrutura de Double Buffering do PS1
+typedef struct {
+    DRAWENV draw;
+    DISPENV disp;
+} DB;
+
+DB db[2];
+int db_atual = 0;
+unsigned char buffer_controle[34];
+
+// Estados do Jogo e Menu
+int idioma = 0; // 0=PT, 1=EN, 2=ES
+int telaAtual = 0; // 0=Menu, 1=Options, 2=Creditos, 3=Jogando, 4=GameOver, 5=Vitoria
+int posicaoMenu = 0;
+
+// Variáveis do Jogo 3D
+float playerX = 8.0f; float playerY = 4.0f; float playerA = 0.0f;
+int cadernosColetados = 0;
+int stamina = 100;
+int estaCorrendo = 0;
+int frameContador = 0; // Usado para o relógio de 60Hz do PS1
+int minutos = 0; int segundos = 0;
+
+// Inventário
+int temBsoda = 0; int temChocolate = 0; int temTesoura = 0; int temChave = 0;
+
+// Posição das Entidades
+float baldiX = 2.0f; float baldiY = 2.0f; int baldiVel = 0;
+float diretorX = 8.0f; float diretorY = 8.0f; int diretorVel = 0;
+
+// Textos Traduzidos [Idioma][Opção]
+char* textosMenu[3][4] = {
+    {"Iniciar Jogo", "Configuracoes", "Creditos", "Sair Jogo"},
+    {"Start Game", "Options", "Credits", "Exit Game"},
+    {"Iniciar Juego", "Configuraciones", "Creditos", "Salir Juego"}
+};
+char* textosOptions[3][2] = {
+    {"Idioma: Portugues", "Voltar"}, {"Language: English", "Back"}, {"Idioma: Espanol", "Volver"}
+};
+
+// Mapa do Labirinto da Escola (1=Parede, 0=Corredor, C=Caderno, S=Bsoda, Z=Choco, T=Tesoura, K=Chave)
+char mapa[MAPA_ALTURA][MAPA_LARGURA] = {
+    "1111111111111111",
+    "1C000100001000C1",
+    "1000010000100001",
+    "1110110000110111",
+    "1000000000000001",
+    "1011111001111101",
+    "1010001001000101",
+    "1000K00000000001",
+    "1010001001000101",
+    "1011111001111101",
+    "1000000000000001",
+    "1110110000110111",
+    "1000010000100001",
+    "1C000100001000C1",
+    "1111111111111111"
+};
+
+void InicializarSistemaPS1() {
+    ResetGraph(0);
+    // Primeiro buffer de tela (Nativo do chip de vídeo do PS1)
+    SetDefDrawEnv(&db[0].draw, 0, 0, VIDEO_LARGURA, VIDEO_ALTURA);
+    SetDefDispEnv(&db[0].disp, 0, 0, VIDEO_LARGURA, VIDEO_ALTURA);
+    // Segundo buffer de tela deslocado verticalmente para não sobrepor
+    SetDefDrawEnv(&db[1].draw, 0, VIDEO_ALTURA, VIDEO_LARGURA, VIDEO_ALTURA);
+    SetDefDispEnv(&db[1].disp, 0, VIDEO_ALTURA, VIDEO_LARGURA, VIDEO_ALTURA);
+    
+    setRGB0(&db[0].draw, 0, 0, 0);
+    setRGB0(&db[1].draw, 0, 0, 0);
+    
+    PutDrawEnv(&db[0].draw);
+    PutDispEnv(&db[0].disp);
+    
+    InitPAD(buffer_controle, 34, buffer_controle, 34);
+    StartPAD();
+    
+    FntLoad(960, 256);
+    FntOpen(8, 8, 304, 224, 0, 1024); // Abre o buffer de texto na tela do console
+}
+
+void InverterBuffersPS1() {
+    DrawSync(0);
+    VSync(0); // Sincroniza com os 60Hz da TV [2]
+    db_atual = !db_atual;
+    PutDrawEnv(&db[db_atual].draw);
+    PutDispEnv(&db[db_atual].disp);
+}
+
+void ResetarPartida() {
+    playerX = 8.0f; playerY = 4.0f; playerA = 0.0f;
+    baldiX = 2.0f; baldiY = 2.0f; diretorX = 8.0f; diretorY = 8.0f;
+    cadernosColetados = 0; stamina = 100; minutos = 0; segundos = 0; frameContador = 0;
+    temBsoda = 0; temChocolate = 0; temTesoura = 0; temChave = 0;
+}
+
+int main() {
+    int direcionalTrava = 0;
+    int botaoTrava = 0;
+    
+    InicializarSistemaPS1();
+    
+    while (1) {
+        // Coleta o registrador binário físico do controle conectado no Slot 1 do PS1
+        unsigned short pad = ~((unsigned short*)(buffer_controle))[1];
+        
+        // ----------------------------------------------------
+        // LÓGICA DE TELAS: MENU PRINCIPAL (0) E OPTIONS (1)
+        // ----------------------------------------------------
+        if (telaAtual == 0 || telaAtual == 1) {
+            FntPrint("     BALDI'S BASICS - PSX MENU     \n");
+            FntPrint("===================================\n\n");
+            
+            int limite = (telaAtual == 0) ? 4 : 2;
+            
+            if (telaAtual == 0) {
+                int i; for(i=0; i<4; i++) FntPrint(i==posicaoMenu ? " -> [ %s ] <-\n" : "    %s\n", textosMenu[idioma][i]);
+            } else {
+                int i; for(i=0; i<2; i++) FntPrint(i==posicaoMenu ? " -> [ %s ] <-\n" : "    %s\n", textosOptions[idioma][i]);
+            }
+            
+            // Navegação no D-Pad do PS1
+            if (!direcionalTrava) {
+                if (pad & PADLup) { posicaoMenu = (posicaoMenu - 1 + limite) % limite; direcionalTrava = 1; }
+                if (pad & PADLdown) { posicaoMenu = (posicaoMenu + 1) % limite; direcionalTrava = 1; }
+            }
+            if (!(pad & (PADLup | PADLdown))) direcionalTrava = 0;
+            
+            // Confirmação com o Botão CROSS (X no PS1)
+            if (!botaoTrava && (pad & PADRdown)) {
+                botaoTrava = 1;
+                if (telaAtual == 0) {
+                    if (posicaoMenu == 0) { telaAtual = 3; ResetarPartida(); }
+                    else if (posicaoMenu == 1) { telaAtual = 1; posicaoMenu = 0; }
+                    else if (posicaoMenu == 2) telaAtual = 2;
+                    else if (posicaoMenu == 3) ResetGraph(3); // Soft reset no hardware do PS1
+                } else {
+                    if (posicaoMenu == 0) idioma = (idioma + 1) % 3; // Muda idioma
+                    else { telaAtual = 0; posicaoMenu = 1; } // Voltar
+                }
+            }
+            // Botão TRIÂNGULO (Voltar)
+            if (!botaoTrava && (pad & PADRup)) { botaoTrava = 1; if (telaAtual == 1) { telaAtual = 0; posicaoMenu = 0; } }
+            if (!(pad & (PADRdown | PADRup))) botaoTrava = 0;
+        }
+        
+        // ----------------------------------------------------
+        // LÓGICA DE TELAS: CRÉDITOS (2)
+        // ----------------------------------------------------
+        else if (telaAtual == 2) {
+            FntPrint("     BALDI'S BASICS - CREDITS      \n");
+            FntPrint("===================================\n\n");
+            FntPrint(idioma == 0 ? " Criado para rodar no Game Stick\n através do emulador nativo de PS1!\n" : " Made for Game Stick PS1 Emulator!\n");
+            FntPrint("\n Pressione TRIANGULO para voltar...");
+            if (pad & PADRup) { telaAtual = 0; posicaoMenu = 2; }
+        }
+        
+        // ----------------------------------------------------
+        // LÓGICA DE TELAS: JOGO 3D ATIVO (3)
+        // ----------------------------------------------------
+        else if (telaAtual == 3) {
+            // RELÓGIO DE HARDWARE: Sincronizado pelos frames de vídeo da TV do PS1
+            frameContador++;
+            if (frameContador >= 60) { // 60 frames = 1 segundo exato [2]
+                frameContador = 0; segundos++;
+                if (segundos >= 60) { segundos = 0; minutos++; }
+            }
+            
+            // Inteligência Artificial do Baldi (Perseguição por Turnos)
+            baldiVel++;
+            if (baldiVel >= (8 - cadernosColetados)) {
+                baldiVel = 0;
+                if (baldiX < playerX && mapa[(int)baldiY][(int)baldiX+1] != '1') baldiX += 1.0f;
+                else if (baldiX > playerX && mapa[(int)baldiY][(int)baldiX-1] != '1') baldiX -= 1.0f;
+                if (baldiY < playerY && mapa[(int)baldiY+1][(int)baldiX] != '1') baldiY += 1.0f;
+                else if (baldiY > playerY && mapa[(int)baldiY-1][(int)baldiX] != '1') baldiY -= 1.0f;
+            }
+            
+            // Colisão com o Baldi (Morte / Game Over)
+            if ((int)playerX == (int)baldiX && (int)playerY == (int)baldiY) { telaAtual = 4; }
+            
+            // Verificação de Vitória (Coletou os 7 e chegou nas bordas)
+            if (cadernosColetados >= TOTAL_CADERNOS && (playerX < 2 || playerX > 14 || playerY < 2 || playerY > 14)) { telaAtual = 5; }
+            
+            // Corrida com o Botão CIRCLE (O no PS1)
+            if ((pad & PADRright) && stamina > 5) { estaCorrendo = 1; stamina -= 2; } 
+            else { estaCorrendo = 0; if (stamina < 100) stamina++; }
+            float velFisica = estaCorrendo ? 0.16f : 0.08f;
+            
+            // Movimentação em Primeira Pessoa com o D-Pad do PS1
+            if (pad & PADLleft)  playerA -= 0.05f; // Gira câmera para a esquerda
+            if (pad & PADLright) playerA += 0.05f; // Gira câmera para a direita
+            if (pad & PADLup) {
+                float nx = playerX + sin(playerA) * velFisica; float ny = playerY + cos(playerA) * velFisica;
+                if (mapa[(int)ny][(int)nx] != '1') { playerX = nx; playerY = ny; }
+            }
+            if (pad & PADLdown) {
+                float nx = playerX - sin(playerA) * velFisica; float ny = playerY - cos(playerA) * velFisica;
+                if (mapa[(int)ny][(int)nx] != '1') { playerX = nx; playerY = ny; }
+            }
+            
+            // Uso de Itens: Botão QUADRADO (BSODA) e Botão TRIÂNGULO (Chocolate)
+            if ((pad & PADRleft) && temBsoda) { temBsoda = 0; baldiX = 2.0f; baldiY = 2.0f; }
+            if ((pad & PADRup) && temChocolate) { temChocolate = 0; stamina = 100; }
+            
+            // Mecânica de Coleta de Blocos no Chão
+            char bloco = mapa[(int)playerY][(int)playerX];
+            if (bloco == 'C') { mapa[(int)playerY][(int)playerX] = '0'; cadernosColetados++; }
+            else if (bloco == 'S') { temBsoda = 1; mapa[(int)playerY][(int)playerX] = '0'; }
+            else if (bloco == 'Z') { temChocolate = 1; mapa[(int)playerY][(int)playerX] = '0'; }
+            else if (bloco == 'T') { temTesoura = 1; mapa[(int)playerY][(int)playerX] = '0'; }
+            else if (bloco == 'K') { temChave = 1; mapa[(int)playerY][(int)playerX] = '0'; }
+            
+            // HUD Superior Nativo do PS1
+            FntPrint(" CADERNOS: %d/%d | %02d:%02d | STAMINA: %d%%\n", cadernosColetados, TOTAL_CADERNOS, minutos, segundos, stamina);
+            
