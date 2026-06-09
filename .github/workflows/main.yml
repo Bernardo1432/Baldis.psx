@@ -6,16 +6,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Baixar Codigo Fonte
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Compilar para PlayStation 1
-        uses: lameguy64/psx-compile-action@v1
+        uses: nopsx/psx-compile-action@v1
         with:
           project-dir: '.'
 
       - name: Disponibilizar Download do Jogo
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: Baldis-Psx-ROM
           path: baldi.exe
+          
           
